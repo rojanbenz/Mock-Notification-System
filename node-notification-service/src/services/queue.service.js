@@ -50,7 +50,6 @@ class QueueService {
             amqp.connect(config_1.default.rabbitMQ.url, (err, conn) => {
                 if (err) {
                     this.logger.error("Failed to connect to RabbitMQ", err);
-                    return console.log("what");
                     return reject(err);
                 }
                 this.connection = conn;
@@ -74,12 +73,16 @@ class QueueService {
         if (!this.channel)
             throw new Error("Channel not initialized");
         this.channel.consume(config_1.default.rabbitMQ.queue, async (msg) => {
+            var _a;
             if (!msg)
                 return;
             try {
-                const content = JSON.parse(msg.content.toString());
+                const raw = JSON.parse(msg.content.toString());
+                const retryCount = (_a = raw.retryCount) !== null && _a !== void 0 ? _a : 0; // ✅ ADDED
+                const content = { ...raw, retryCount }; // ✅ ADDED
                 this.logger.info("Processing notification", {
                     notificationId: content.notification_id,
+                    retryCount,
                 });
                 const success = await callback(content);
                 if (success) {
@@ -89,15 +92,30 @@ class QueueService {
                     });
                 }
                 else {
-                    this.logger.warn("Notification processing failed, discarding", {
+                    this.logger.warn("Notification failed after retries. Discarding.", {
                         notificationId: content.notification_id,
+                        retryCount,
                     });
-                    this.channel.nack(msg, false, false); // Do not requeue
+                    this.channel.nack(msg, false, false); // Discard permanently
                 }
             }
             catch (error) {
-                this.logger.error("Error processing message", error);
-                this.channel.nack(msg, false, false); // Do not requeue
+                if (error.shouldRetry && error.retryCount <= 3) {
+                    // ✅ RETRY LOGIC: Requeue message
+                    this.logger.warn("Retrying notification processing", {
+                        retryCount: error.retryCount,
+                    });
+                    const retryMessage = {
+                        ...JSON.parse(msg.content.toString()),
+                        retryCount: error.retryCount,
+                    };
+                    this.channel.sendToQueue(config_1.default.rabbitMQ.queue, Buffer.from(JSON.stringify(retryMessage)), { persistent: true });
+                    this.channel.ack(msg); // ✅ Acknowledge original message
+                }
+                else {
+                    this.logger.error("Error processing message. Discarding.", error);
+                    this.channel.nack(msg, false, false); // Discard permanently
+                }
             }
         }, { noAck: false });
     }

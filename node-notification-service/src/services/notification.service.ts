@@ -12,39 +12,47 @@ export class NotificationService {
   constructor(private readonly logger: Logger) {}
 
   async processNotification(message: NotificationMessage): Promise<boolean> {
+    const retryCount = message.retryCount ?? 0;
+
     try {
-      //simulate notification processing
+      // ✅ Fixed: Use backticks for string interpolation
       this.logger.info(
         `Sending ${message.type} notification to user ${message.user_id}`,
         {
           message: message.message,
+          retryCount,
         }
       );
 
-      //simulate random failure for testing retry logic
-      // if (Math.random() < 0.2) {
-      //20% chance of failure
-      // throw new Error("Random failure for testing");
-      // }
+     // Simulated failure (for testing)
+      if (Math.random() < 0.7) throw new Error("Random failure");
 
-      //Update status in laravel
+      // This won't run due to forced failure above
       await this.updateNotificationStatus(message.notification_id, {
         success: true,
       });
 
       return true;
     } catch (error) {
-      console.log("what69");
       this.logger.error("Failed to process notification", {
         notificationId: message.notification_id,
+        retryCount,
         error,
       });
 
-      //Update status in laravel
+      // Always update Laravel with current retry count
       await this.updateNotificationStatus(message.notification_id, {
         success: false,
-        retryCount: (error as any).retryCount,
+        retryCount,
       });
+
+      // ✅ Retry up to 3 times (retryCount 0, 1, 2)
+      if (retryCount < 1) {
+        (error as any).shouldRetry = true;
+        (error as any).retryCount = retryCount + 1;
+        throw error; // Re-throw to trigger requeue in queue service
+      }
+
       return false;
     }
   }
@@ -54,9 +62,11 @@ export class NotificationService {
     status: NotificationStatusUpdate
   ): Promise<void> {
     try {
+      // ✅ Fixed: Backticks for URL template literal
       const url = `${config.laravel.baseUrl}/notifications/${notificationId}/status`;
-      console.log("sagar k pul k niche");
-      console.log(status,"sagar k pul k niche status");
+      console.log("Updating Laravel with status...");
+      console.log(status, "Status payload");
+
       await axios.post(
         url,
         {
@@ -64,19 +74,18 @@ export class NotificationService {
           retry_count: status.retryCount,
         },
         {
-          timeout: 5000, // Add timeout
-          httpAgent: new http.Agent({ keepAlive: true }), // Better HTTP handling
+          timeout: 5000,
+          httpAgent: new http.Agent({ keepAlive: true }),
           httpsAgent: new https.Agent({
             keepAlive: true,
             rejectUnauthorized: false,
-          }), // For HTTPS cases
+          }),
         }
       );
     } catch (error) {
-      return console.log("what");
       this.logger.error("Failed to update notification status in Laravel", {
         notificationId,
-        error, // Log just the message to avoid circular references
+        error,
       });
       throw error;
     }

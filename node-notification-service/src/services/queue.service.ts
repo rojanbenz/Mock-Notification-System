@@ -14,7 +14,6 @@ export class QueueService {
       amqp.connect(config.rabbitMQ.url, (err, conn) => {
         if (err) {
           this.logger.error("Failed to connect to RabbitMQ", err);
-          return console.log("what");
           return reject(err);
         }
 
@@ -54,12 +53,13 @@ export class QueueService {
         if (!msg) return;
 
         try {
-          const content = JSON.parse(
-            msg.content.toString()
-          ) as NotificationMessage;
+          const raw = JSON.parse(msg.content.toString());
+          const retryCount = raw.retryCount ?? 0; // ✅ ADDED
+          const content: NotificationMessage = { ...raw, retryCount }; // ✅ ADDED
 
           this.logger.info("Processing notification", {
             notificationId: content.notification_id,
+            retryCount,
           });
 
           const success = await callback(content);
@@ -70,14 +70,35 @@ export class QueueService {
               notificationId: content.notification_id,
             });
           } else {
-            this.logger.warn("Notification processing failed, discarding", {
+            this.logger.warn("Notification failed after retries. Discarding.", {
               notificationId: content.notification_id,
+              retryCount,
             });
-            this.channel!.nack(msg, false, false); // Do not requeue
+            this.channel!.nack(msg, false, false); // Discard permanently
           }
-        } catch (error) {
-          this.logger.error("Error processing message", error);
-          this.channel!.nack(msg, false, false); // Do not requeue
+        } catch (error: any) {
+          if (error.shouldRetry && error.retryCount <= 3) {
+            // ✅ RETRY LOGIC: Requeue message
+            this.logger.warn("Retrying notification processing", {
+              retryCount: error.retryCount,
+            });
+
+            const retryMessage = {
+              ...JSON.parse(msg.content.toString()),
+              retryCount: error.retryCount,
+            };
+
+            this.channel!.sendToQueue(
+              config.rabbitMQ.queue,
+              Buffer.from(JSON.stringify(retryMessage)),
+              { persistent: true }
+            );
+
+            this.channel!.ack(msg); // ✅ Acknowledge original message
+          } else {
+            this.logger.error("Error processing message. Discarding.", error);
+            this.channel!.nack(msg, false, false); // Discard permanently
+          }
         }
       },
       { noAck: false }
